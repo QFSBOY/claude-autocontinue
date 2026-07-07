@@ -157,7 +157,12 @@ if [ -z "$HOOK_MODE" ]; then
   MODE_NOTE=""
   [ -n "$TEST_DELAY" ] && MODE_NOTE=" [TEST: fires in ${TEST_DELAY}s]"
   POWER_NOTE=""
-  pmset -g batt 2>/dev/null | head -1 | grep -q "AC Power" || POWER_NOTE=" (On battery — hardware wake needs the setup-wake.sh sudoers rule; without it a sleeping Mac fires on its next wake.)"
+  # Warn about battery only when the wake sudoers rule is absent (probe with a
+  # harmless no-op — disablesleep 0 when it is already 0 changes nothing).
+  if ! pmset -g batt 2>/dev/null | head -1 | grep -q "AC Power"; then
+    sudo -n /usr/bin/pmset -a disablesleep 0 >/dev/null 2>&1 \
+      || POWER_NOTE=" (On battery — hardware wake needs the setup-wake.sh sudoers rule; without it a sleeping Mac fires on its next wake.)"
+  fi
 
   USAGE_NOTE=""
   CRED=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
