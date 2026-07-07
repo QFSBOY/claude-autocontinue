@@ -1,10 +1,31 @@
+<div align="center">
+
 # claude-autocontinue
 
-**Hit your Claude Code rate limit, walk away, and have your session pick itself back up the moment your usage resets — even with the Mac asleep, locked, lid closed, on battery.**
+**Hit your Claude Code rate limit, walk away — and have your session pick itself back up the instant your usage resets.**
 
-Type `/autocontinue` in any Claude Code session. When your 5-hour usage window resets, autocontinue wakes your Mac (if needed), types **"continue where you left off"** into that exact session, presses Enter, holds the Mac awake while Claude works, then lets it go back to sleep.
+Even if the Mac is asleep. Even if the lid is closed. Even if it's locked and on battery.
 
-100% on-device add-on: no AI involvement, no API calls to arm it (works *while* you're rate-limited), zero modifications to the Claude Code install — it survives every update.
+[![macOS](https://img.shields.io/badge/macOS-required-000000?logo=apple&logoColor=white)](#requirements)
+[![Shell](https://img.shields.io/badge/Shell-Bash-4EAA25?logo=gnubash&logoColor=white)](#how-it-works)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%201.0.62-6A5ACD)](#requirements)
+[![No AI in the loop](https://img.shields.io/badge/arming-100%25%20on--device-brightgreen)](#how-it-works)
+
+</div>
+
+---
+
+## What it does
+
+Type `/autocontinue` in any Claude Code session and walk away. When your usage window resets, autocontinue:
+
+1. **Wakes your Mac** if it's asleep (hardware RTC timer — works lid-closed, on battery)
+2. **Types `continue where you left off`** into that exact session and presses Enter — even through a locked screen
+3. **Holds the Mac awake** while Claude actually does the work
+4. Lets everything go back to sleep, cleanly, with nothing left running
+
+No AI is involved in arming it. `/autocontinue` is intercepted **on your device, before it ever reaches the API** — which is exactly why it works even while you're actively rate-limited and Claude can't respond to anything. It never touches the Claude Code installation itself, so it survives every update.
 
 ## Install
 
@@ -12,58 +33,83 @@ Type `/autocontinue` in any Claude Code session. When your 5-hour usage window r
 curl -fsSL https://raw.githubusercontent.com/QFSBOY/claude-autocontinue/master/install.sh | bash
 ```
 
-Then **restart Claude Code** (hooks load at startup).
+The installer runs a preflight check (macOS, Claude Code version, python3, your `claude` binary, Keychain login, tmux) before touching anything, and safely merges into your existing `settings.json` — your other hooks are left untouched.
 
-Optional but recommended — let it wake a sleeping Mac at the exact reset time (one password prompt, tightly-scoped sudo rule):
+**Restart Claude Code** afterward (hooks load at startup).
+
+Optional, recommended — lets it wake a sleeping Mac at the exact moment your usage resets:
 
 ```bash
 bash ~/.claude/autocontinue/setup-wake.sh
 ```
 
-## Use
+One password prompt, installs four narrowly-scoped `pmset` sudoers rules. Nothing else. See [Security](#security).
+
+## Usage
 
 | Command | Effect |
 |---|---|
 | `/autocontinue` | Arm this session — auto-continues at the next usage reset |
-| `/autocontinue status` | Armed? Which sessions? Recent log |
+| `/autocontinue status` | Show armed state, other sessions, recent log |
 | `/autocontinue off` | Disarm this session |
-| `/autocontinue test 30` | Full end-to-end rehearsal, fires in 30s |
+| `/autocontinue test 30` | Full end-to-end rehearsal — fires in 30 seconds |
 
-The command is intercepted **on your machine before it reaches the API** (a `UserPromptSubmit` hook that blocks the prompt), so it works even when Claude is fully rate-limited and can't respond. Each armed session gets its own independent watcher — arm as many concurrent sessions as you like; each gets exactly one continue message.
+Arm as many concurrent sessions as you like. Each gets its own independent watcher and exactly one continue message — they never interfere with each other.
 
 ## How it works
 
-1. **Arm** — a hook catches `/autocontinue` on-device, records the session's identity (session id, terminal tty, tmux pane, resolved `claude`/`tmux` paths), and detaches a watcher.
-2. **Watch** — the watcher reads your real usage state from Anthropic's OAuth usage endpoint (Keychain token, no LLM guessing): current %, the 5-hour window reset time, *and weekly limits* — if a weekly limit is maxed, it fires at the weekly reset instead of uselessly typing into a blocked session.
-3. **Wake** — a `launchd` calendar job plus (with setup-wake.sh) a `pmset` hardware RTC wake fire at the reset time. The RTC wake works lid-closed on battery.
-4. **Deliver** — first path that works wins, exactly once (atomic claim):
-   - **tmux `send-keys`** — injects at the pty layer; the *only* path that works through a locked screen
-   - **GUI keystroke** — AppleScript into the exact Terminal.app tab or iTerm2 session that owns the armed tty (needs the screen unlocked + one-time Accessibility grant)
-   - **headless `claude -p --resume`** — same session transcript continues in the background; reopen later with `claude --resume` (20-min watchdog)
-5. **Hold** — keeps the Mac awake while the continued turn actually runs: `pmset disablesleep` (defeats clamshell sleep, which `caffeinate` can't) + `caffeinate -u` (full wake, no DarkWake throttling). Minimum 7 min, extends while Claude is visibly working (transcript writes or the TUI spinner), releases 3.5 min after it goes quiet, 25-min hard cap, always restores normal sleep (trap-protected, refcounted across concurrent sessions).
+```mermaid
+flowchart TD
+    A["/autocontinue typed"] -->|"UserPromptSubmit hook<br/>on-device, pre-API"| B[arm.sh]
+    B --> C["records session id, tty,<br/>tmux pane, claude/tmux paths"]
+    C --> D["detached watcher"]
+    D --> E{"usage endpoint:<br/>reset time?"}
+    E --> F["launchd calendar job<br/>+ pmset RTC wake"]
+    F -->|"Mac can be asleep"| G["reset time arrives"]
+    G --> H["Mac wakes"]
+    H --> I{"delivery cascade"}
+    I -->|"1st choice"| J["tmux send-keys<br/>(works through lock screen)"]
+    I -->|"2nd choice"| K["AppleScript keystroke<br/>Terminal.app / iTerm2"]
+    I -->|"fallback"| L["headless claude -p --resume"]
+    J --> M["pmset disablesleep +<br/>caffeinate -u hold"]
+    K --> M
+    L --> M
+    M --> N["turn completes,<br/>sleep restored"]
+```
+
+1. **Arm** — the `UserPromptSubmit` hook catches `/autocontinue` before it reaches the API, records the session's identity, and detaches a watcher process.
+2. **Watch** — the watcher reads your real usage state from Anthropic's own OAuth usage endpoint (your Keychain token, no guessing): current %, the 5-hour window reset time, *and* weekly limits. If a weekly limit is maxed, it correctly waits for the weekly reset instead of firing uselessly into a still-blocked session.
+3. **Wake** — a `launchd` calendar job plus a `pmset` hardware wake fire at reset time. The hardware wake works lid-closed, on battery, fully asleep.
+4. **Deliver** — first path that works wins, exactly once, via an atomic claim so a backup and primary watcher can never double-fire:
+   - **tmux `send-keys`** — injects at the pty layer, the *only* method that works through a locked screen
+   - **AppleScript keystroke** — into the exact Terminal.app tab or iTerm2 session that owns the armed tty
+   - **headless `claude -p --resume`** — continues the same session transcript in the background if neither of the above is possible
+5. **Hold** — keeps the Mac awake while the turn actually runs (`pmset disablesleep` defeats clamshell sleep; `caffeinate -u` avoids DarkWake throttling). Minimum 7 minutes, extends while Claude is visibly working, releases automatically, always restores normal sleep behavior afterward.
 
 ## Requirements
 
-- macOS (uses launchd, pmset, osascript, Keychain)
-- Claude Code ≥ 1.0.62 (UserPromptSubmit hooks) — installer checks and tells you to `claude update` if too old
-- python3 (Xcode Command Line Tools — you almost certainly have it)
-- Logged into Claude Code with a claude.ai subscription (usage/reset times come from the OAuth usage endpoint; API-key setups degrade to probe mode)
-- **Recommended:** `tmux` (`brew install tmux`) and running claude inside it — locked-screen delivery only works via tmux
+| | |
+|---|---|
+| OS | macOS (uses `launchd`, `pmset`, `osascript`, Keychain) |
+| Claude Code | ≥ 1.0.62 (`UserPromptSubmit` hook support) |
+| python3 | Ships with Xcode Command Line Tools |
+| Login | Claude Code logged in via claude.ai subscription (API-key setups still work, degraded to polling) |
+| Recommended | [`tmux`](https://github.com/tmux/tmux) — the only delivery path that survives a locked screen |
 
-Works on Apple Silicon and Intel; finds your `claude` wherever it's installed (npm-global, Homebrew, `~/.local/bin`, nvm/volta) by resolving it at arm time in your real shell PATH.
+Works identically on Apple Silicon and Intel. Finds `claude` wherever it lives — Homebrew, npm-global, `~/.local/bin`, nvm, volta — by resolving it in your real shell `PATH` at arm time, not launchd's stripped-down one.
 
 ## Honest limitations
 
-- **Locked screen + no tmux** → GUI keystrokes are impossible at the macOS lock screen (OS security wall). Falls back to headless resume — work continues, you view it with `claude --resume`.
-- **Sleeping Mac without setup-wake.sh** → launchd can't wake hardware; delivery happens on the next manual wake instead of on time.
-- **The continue message fires at the reset even if you weren't blocked** — it's usage-reset-driven by design. Disarm with `/autocontinue off` if you don't want it.
-- The GPU/display state after an RTC wake on battery is a DarkWake; `caffeinate -u` promotes it, but extremely long unattended turns on battery are less battle-tested than on AC power.
+- **Locked screen, no tmux** → GUI keystrokes are architecturally impossible at the macOS lock screen. Falls back to headless resume; you review the result later with `claude --resume`.
+- **Sleeping Mac, no `setup-wake.sh`** → nothing can wake real hardware without it; delivery happens on your next manual wake instead of exactly on time.
+- **Fires at the reset regardless of whether you actually hit the limit** — usage-reset-driven by design, not limit-driven. `/autocontinue off` if that's not what you want for a given session.
+- Extremely long unattended turns triggered from a battery-powered DarkWake are less thoroughly tested than the AC-power path.
 
-## Security notes
+## Security
 
-- The sudoers drop-in is scoped to exactly four `pmset` invocations (schedule wake / cancelall / disablesleep 1 / disablesleep 0) — nothing else, validated with `visudo -c`, removable with `sudo rm /etc/sudoers.d/claude-autocontinue-pmset`.
-- Your OAuth token is read from your own Keychain at runtime and sent only to `api.anthropic.com` — the same endpoint Claude Code itself uses. It is never stored or logged.
-- Keystrokes are only ever sent to the specific terminal tab/pane that owns the armed session's tty — never blind typing into the frontmost app.
+- The sudoers drop-in (`setup-wake.sh`) grants exactly four commands — `pmset schedule wake`, `pmset schedule cancelall`, `pmset -a disablesleep 1`, `pmset -a disablesleep 0` — nothing broader, validated with `visudo -c` before install. Remove anytime: `sudo rm /etc/sudoers.d/claude-autocontinue-pmset`.
+- Your OAuth token is read from your own Keychain at runtime and sent only to `api.anthropic.com` — the same endpoint the official Claude Code CLI uses. Never stored, never logged.
+- Keystrokes are sent only to the specific terminal tab or tmux pane that owns the armed session's tty. Never blind input into whatever's frontmost.
 
 ## Uninstall
 
@@ -71,8 +117,26 @@ Works on Apple Silicon and Intel; finds your `claude` wherever it's installed (n
 bash ~/.claude/autocontinue/uninstall.sh
 ```
 
-Stops watchers, restores sleep settings, removes launchd jobs, the hook, all files, and (with your password) the sudoers rule.
+Stops all watchers, restores sleep settings, removes launchd jobs, removes the hook from `settings.json`, deletes all files, and (with one password prompt) removes the sudoers rule.
+
+## FAQ
+
+**Does this send my prompts anywhere?**
+No. `/autocontinue` never reaches the API — it's blocked and handled entirely on your machine. The only network call the watcher makes is to Anthropic's usage endpoint, authenticated with your own existing Keychain credentials.
+
+**Will it fight with other Claude Code hooks or plugins?**
+No. The installer only *appends* to your `UserPromptSubmit` hooks array — existing hooks (yours or a plugin's) are left exactly as they were.
+
+**What if I don't use tmux?**
+Everything still works while your Mac is unlocked. A locked screen falls back to continuing the session in the background — you just can't watch it live through the lock without tmux.
+
+**Why does it fire even if I never hit the limit?**
+By design — "continue where you left off" makes sense at your usage reset whether you were blocked or just paused. Disarm a session anytime with `/autocontinue off`.
+
+## Contributing
+
+Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT
+[MIT](LICENSE)
