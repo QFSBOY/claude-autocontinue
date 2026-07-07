@@ -14,6 +14,12 @@ Even if the Mac is asleep. Even if the lid is closed. Even if it's locked and on
 
 </div>
 
+<p align="center">
+  <img src="docs/images/autocontinue-fire.png" alt="autocontinue firing: session hits the rate limit, then 'continue where you left off' is automatically typed and submitted the moment usage resets" width="720">
+  <br>
+  <sub>A real fire, unedited: the session limit hits, then autocontinue types and submits "continue where you left off" on its own.</sub>
+</p>
+
 ---
 
 ## What it does
